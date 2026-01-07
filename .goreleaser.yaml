@@ -1,0 +1,89 @@
+# This is an example .goreleaser.yml file with some sensible defaults.
+# Make sure to check the documentation at https://goreleaser.com
+version: 2
+
+before:
+  hooks:
+    # You may remove this if you don't use go modules.
+    - go mod tidy
+
+builds:
+  - env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    dir: ./cmd/sshx
+    binary: sshx
+
+archives:
+  - format: tar.gz
+    # this name template makes the archives use the same name format as the
+    # artifacts (binaries), which is name_version_os_arch
+    name_template: >-
+      {{ .ProjectName }}_
+      {{- title .Os }}_
+      {{- if eq .Arch "amd64" }}x86_64
+      {{- else if eq .Arch "386" }}i386
+      {{- else }}{{ .Arch }}{{ end }}
+      {{- if .Arm }}v{{ .Arm }}{{ end }}
+    # use zip for windows archives
+    format_overrides:
+    - goos: windows
+      format: zip
+
+checksum:
+  name_template: 'checksums.txt'
+
+snapshot:
+  version_template: "{{ .Tag }}-next"
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - '^docs:'
+      - '^test:'
+
+brews:
+  -
+    # Name template of the recipe
+    # Default to project name
+    name: sshx
+
+    # Repository to push the tap to.
+    repository:
+      owner: geraldcsoftware
+      name: homebrew-tap
+      # token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
+
+    # Template for the url which is determined by the given Token (github, gitlab or gitea)
+    # Default for github is "https://github.com/<repo_owner>/<repo_name>/releases/download/{{ .Tag }}/{{ .ArtifactName }}"
+    url_template: "https://github.com/geraldcsoftware/sshx/releases/download/{{ .Tag }}/{{ .ArtifactName }}"
+
+    # Git author used to commit to the repository.
+    # Defaults are shown.
+    commit_author:
+      name: goreleaserbot
+      email: bot@goreleaser.com
+
+    # The project name and current version are available in the Template.
+    # Default is the project name.
+    # folder: Formula
+
+    # Homepage description.
+    homepage: "https://github.com/geraldcsoftware/sshx"
+
+    # Description of the software.
+    description: "SSH helper tool for managing and connecting to servers"
+
+    # License of the software.
+    license: "MIT"
+
+    # Custom install script for brew.
+    # Default is 'bin.install "program"'.
+    install: |
+      bin.install "sshx"
