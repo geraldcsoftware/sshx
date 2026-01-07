@@ -3,6 +3,7 @@ package tui
 import (
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -38,7 +39,21 @@ var (
 	yellowColor    = lipgloss.Color("#FFFF00") // Yellow for Warning
 	redColor       = lipgloss.Color("#FF0000") // Red for Error
 
-	docStyle       = lipgloss.NewStyle().Margin(1, 2)
+	// App Styles
+	appStyle = lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(secondaryColor).
+		Padding(0)
+
+	paneStyle = lipgloss.NewStyle().
+		Padding(0, 1)
+
+	headerStyle = lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#FFFFFF")).
+		Background(secondaryColor).
+		Bold(true).
+		Padding(0, 1).
+		MarginBottom(1)
 
 	// List Styles
 	titleStyle = lipgloss.NewStyle(). 
@@ -298,10 +313,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.windowWidth = msg.Width
 		m.windowHeight = msg.Height
-		h, v := docStyle.GetFrameSize()
-		m.list.SetSize(msg.Width-h, msg.Height-v)
-		m.keyPicker.SetWidth(msg.Width - h - 4)
-		m.groupPicker.SetWidth(msg.Width - h - 4)
+		h, v := appStyle.GetFrameSize()
+		availWidth := msg.Width - h
+		availHeight := msg.Height - v
+
+		// 60% for list
+		listWidth := int(float64(availWidth) * 0.6)
+		m.list.SetSize(listWidth, availHeight)
+		
+		// Full width for pickers in config mode
+		m.keyPicker.SetWidth(availWidth - 4)
+		m.groupPicker.SetWidth(availWidth - 4)
 
 	case HostStatusMsg:
 		// Update status in config (memory only)
@@ -398,17 +420,95 @@ func (m Model) View() string {
 		return ""
 	}
 
+	h, v := appStyle.GetFrameSize()
+	availW := m.windowWidth - h
+	availH := m.windowHeight - v
+	if availW < 0 {
+		availW = 0
+	}
+	if availH < 0 {
+		availH = 0
+	}
+
+	var content string
 	switch m.mode {
 	case ModeSelect:
-		return docStyle.Render(m.list.View())
+		leftW := m.list.Width()
+		rightW := availW - leftW
+
+		leftView := m.list.View()
+		rightView := m.viewGroups(rightW, availH)
+		content = lipgloss.JoinHorizontal(lipgloss.Top, leftView, rightView)
+
 	case ModeConfigure:
-		return docStyle.Render(m.viewConfigure())
+		content = paneStyle.Render(m.viewConfigure())
 	case ModeDeleteConfirm:
-		return docStyle.Render(m.viewDeleteConfirm())
+		content = paneStyle.Render(m.viewDeleteConfirm())
 	case ModeConnectWarn:
-		return docStyle.Render(m.viewConnectWarn())
+		content = paneStyle.Render(m.viewConnectWarn())
 	}
-	return ""
+
+	return appStyle.Width(availW).Height(availH).Render(content)
+}
+
+func (m Model) viewGroups(width, height int) string {
+	var b strings.Builder
+
+	// Header
+	headerText := "Configured Groups"
+	headerWidth := width - 4 // Account for padding
+	if headerWidth < 0 {
+		headerWidth = 0
+	}
+
+	header := headerStyle.Width(headerWidth).Render(headerText)
+	b.WriteString(header + "\n")
+
+	// Collect Stats
+	groups := make(map[string]int)
+	groupStatus := make(map[string]map[config.Status]int)
+
+	for _, d := range m.cfg.Destinations {
+		g := d.Group
+		if g == "" {
+			g = "Uncategorized"
+		}
+		groups[g]++
+
+		if groupStatus[g] == nil {
+			groupStatus[g] = make(map[config.Status]int)
+		}
+		groupStatus[g][d.Status]++
+	}
+
+	// Sort groups
+	var sortedGroups []string
+	for g := range groups {
+		sortedGroups = append(sortedGroups, g)
+	}
+	sort.Strings(sortedGroups)
+
+	// Render
+	contentStyle := lipgloss.NewStyle().PaddingLeft(1)
+
+	for _, g := range sortedGroups {
+		count := groups[g]
+		b.WriteString(contentStyle.Render(fmt.Sprintf("• %s (%d)", g, count)) + "\n")
+
+		stats := groupStatus[g]
+		if stats[config.StatusOk] > 0 {
+			b.WriteString(contentStyle.PaddingLeft(3).Foreground(greenColor).Render(fmt.Sprintf("● %d online", stats[config.StatusOk])) + "\n")
+		}
+		if stats[config.StatusOffline] > 0 {
+			b.WriteString(contentStyle.PaddingLeft(3).Foreground(subtleColor).Render(fmt.Sprintf("○ %d offline", stats[config.StatusOffline])) + "\n")
+		}
+		if stats[config.StatusKeyError] > 0 {
+			b.WriteString(contentStyle.PaddingLeft(3).Foreground(yellowColor).Render(fmt.Sprintf("▲ %d warning", stats[config.StatusKeyError])) + "\n")
+		}
+		b.WriteString("\n")
+	}
+
+	return paneStyle.Width(width).Height(height).Render(b.String())
 }
 
 // --- Configure Mode Logic ---
