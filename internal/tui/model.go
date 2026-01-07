@@ -155,11 +155,15 @@ type Model struct {
 	warnTarget *config.Destination
 
 	// State
-	Quitting     bool
-	SelectedDest *config.Destination
-	windowWidth  int
-	windowHeight int
+	Quitting      bool
+	SelectedDest  *config.Destination
+	windowWidth   int
+	windowHeight  int
+	initialFilter string
 }
+
+type startFilteringMsg struct{}
+type typeFilterMsg string
 
 func NewModel(cfg *config.Config, sshMgr *ssh.Manager, initialFilter string, configureHost string) Model {
 	// Initialize Inputs
@@ -218,16 +222,17 @@ func NewModel(cfg *config.Config, sshMgr *ssh.Manager, initialFilter string, con
 	l.Styles.Title = titleStyle
 	l.Styles.PaginationStyle = paginationStyle
 	l.Styles.HelpStyle = helpStyle
-	l.FilterInput.SetValue(initialFilter)
+	// Filter logic handled in Init/Update via simulated keys
 
 	m := Model{
-		cfg:         cfg,
-		sshManager:  sshMgr,
-		mode:        ModeSelect,
-		list:        l,
-		inputs:      inputs,
-		keyPicker:   keyList,
-		groupPicker: groupList,
+		cfg:           cfg,
+		sshManager:    sshMgr,
+		mode:          ModeSelect,
+		list:          l,
+		inputs:        inputs,
+		keyPicker:     keyList,
+		groupPicker:   groupList,
+		initialFilter: initialFilter,
 	}
 
 	m.refreshList()
@@ -287,7 +292,11 @@ uniqueGroups[d.Group] = true
 }
 
 func (m Model) Init() tea.Cmd {
-	return tea.Batch(textinput.Blink, m.checkAllHosts())
+	cmds := []tea.Cmd{textinput.Blink, m.checkAllHosts()}
+	if m.initialFilter != "" {
+		cmds = append(cmds, func() tea.Msg { return startFilteringMsg{} })
+	}
+	return tea.Batch(cmds...)
 }
 
 func (m *Model) checkAllHosts() tea.Cmd {
@@ -310,6 +319,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 
 	switch msg := msg.(type) {
+	case startFilteringMsg:
+		// Simulate '/' to start filtering
+		var c tea.Cmd
+		m.list, c = m.list.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/")})
+		return m, tea.Batch(c, func() tea.Msg { return typeFilterMsg(m.initialFilter) })
+
+	case typeFilterMsg:
+		// Simulate typing the filter
+		m.list, cmd = m.list.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(string(msg))})
+		return m, cmd
+
 	case tea.WindowSizeMsg:
 		m.windowWidth = msg.Width
 		m.windowHeight = msg.Height
