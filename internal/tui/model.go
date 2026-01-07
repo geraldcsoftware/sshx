@@ -21,13 +21,23 @@ const (
 	ModeSelect Mode = iota
 	ModeConfigure
 	ModeDeleteConfirm
+	ModeConnectWarn
 )
+
+// HostStatusMsg is sent when a host check completes
+type HostStatusMsg struct {
+	Result ssh.CheckResult
+}
 
 // Styles
 var (
 	primaryColor   = lipgloss.Color("#FF00FF") // Magenta
 	secondaryColor = lipgloss.Color("#9B59B6") // Purple
 	subtleColor    = lipgloss.Color("#626262") // Grey
+	greenColor     = lipgloss.Color("#00FF00") // Green for OK
+	yellowColor    = lipgloss.Color("#FFFF00") // Yellow for Warning
+	redColor       = lipgloss.Color("#FF0000") // Red for Error
+
 	docStyle       = lipgloss.NewStyle().Margin(1, 2)
 
 	// List Styles
@@ -53,9 +63,6 @@ var (
 	blurredStyle = lipgloss.NewStyle().Foreground(subtleColor)
 	cursorStyle  = focusedStyle.Copy()
 	noStyle      = lipgloss.NewStyle()
-
-	focusedButton = focusedStyle.Copy().Render("[ Submit ]")
-	blurredButton = fmt.Sprintf("[ %s ]", blurredStyle.Render("Submit"))
 )
 
 // DestinationItem implements list.Item
@@ -66,7 +73,22 @@ type DestinationItem struct {
 func (i DestinationItem) Title() string       { return i.Dest.Alias }
 func (i DestinationItem) Description() string {
 	t := timeAgo(i.Dest.LastConnectedAt)
-	return fmt.Sprintf("%s • %s", i.Dest.Hostname, t)
+	statusIcon := "○" // Offline/Unknown (Gray)
+	statusStyle := lipgloss.NewStyle().Foreground(subtleColor)
+
+	switch i.Dest.Status {
+	case config.StatusOk:
+		statusIcon = "●" // OK (Green)
+		statusStyle = lipgloss.NewStyle().Foreground(greenColor)
+	case config.StatusOffline:
+		statusIcon = "○"
+		statusStyle = lipgloss.NewStyle().Foreground(subtleColor)
+	case config.StatusKeyError:
+		statusIcon = "▲" // Warning (Yellow)
+		statusStyle = lipgloss.NewStyle().Foreground(yellowColor)
+	}
+
+	return fmt.Sprintf("%s %s • %s", statusStyle.Render(statusIcon), i.Dest.Hostname, t)
 }
 func (i DestinationItem) FilterValue() string { return i.Dest.Alias + " " + i.Dest.Hostname }
 
@@ -113,6 +135,9 @@ type Model struct {
 	
 	// Delete Mode
 	deleteTarget *config.Destination
+
+	// Connect Warn Mode
+	warnTarget *config.Destination
 
 	// State
 	Quitting     bool
@@ -221,7 +246,6 @@ func (m *Model) refreshPickers() {
 	keys, _ := m.sshManager.ListKeys()
 	keyItems := []list.Item{SimpleItem("[Generate New]")}
 	for _, k := range keys {
-		// simplify display to show only filename
 		parts := strings.Split(k, "/")
 		name := parts[len(parts)-1]
 		keyItems = append(keyItems, SimpleItem(name))
@@ -236,7 +260,6 @@ func (m *Model) refreshPickers() {
 uniqueGroups[d.Group] = true
 		}
 	}
-	// Also add groups from config definition
 	for g := range m.cfg.Groups {
 		uniqueGroups[g] = true
 	}
@@ -249,7 +272,23 @@ uniqueGroups[d.Group] = true
 }
 
 func (m Model) Init() tea.Cmd {
-	return textinput.Blink
+	return tea.Batch(textinput.Blink, m.checkAllHosts())
+}
+
+func (m *Model) checkAllHosts() tea.Cmd {
+	var cmds []tea.Cmd
+	for _, d := range m.cfg.Destinations {
+		cmds = append(cmds, checkHostCmd(d.Alias, d.Hostname))
+	}
+	return tea.Batch(cmds...)
+}
+
+func checkHostCmd(alias, hostname string) tea.Cmd {
+	return func() tea.Msg {
+		// 3 second timeout for checks
+		res := ssh.CheckHost(alias, hostname, 3*time.Second)
+		return HostStatusMsg{Result: res}
+	}
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -261,12 +300,25 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.windowHeight = msg.Height
 		h, v := docStyle.GetFrameSize()
 		m.list.SetSize(msg.Width-h, msg.Height-v)
-		// Set picker widths
 		m.keyPicker.SetWidth(msg.Width - h - 4)
 		m.groupPicker.SetWidth(msg.Width - h - 4)
 
+	case HostStatusMsg:
+		// Update status in config (memory only)
+		for i := range m.cfg.Destinations {
+			if m.cfg.Destinations[i].Alias == msg.Result.Alias {
+				m.cfg.Destinations[i].Status = msg.Result.Status
+				// Trigger list refresh to show new status
+				// Note: this might be inefficient if many hosts return at once,
+				// but Bubble Tea handles batching somewhat.
+				// In a larger app, we'd optimize.
+				m.refreshList()
+				break
+			}
+		}
+		return m, nil
+
 	case tea.KeyMsg:
-		// Global Quitting
 		if msg.String() == "ctrl+c" {
 			m.Quitting = true
 			return m, tea.Quit
@@ -281,7 +333,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			if msg.String() == "enter" {
 				if i, ok := m.list.SelectedItem().(DestinationItem); ok {
-					m.SelectedDest = &i.Dest
+					// Check status before connecting
+					if i.Dest.Status == config.StatusKeyError {
+						m.warnTarget = &i.Dest
+						m.mode = ModeConnectWarn
+						return m, nil
+					}
+				m.SelectedDest = &i.Dest
 					return m, tea.Quit
 				}
 			}
@@ -298,7 +356,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			
 		case ModeDeleteConfirm:
 			if msg.String() == "y" || msg.String() == "Y" || msg.String() == "enter" {
-				// Execute Delete
 				newDest := []config.Destination{}
 				for _, d := range m.cfg.Destinations {
 					if d.Alias != m.deleteTarget.Alias {
@@ -316,10 +373,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.mode = ModeSelect
 				return m, nil
 			}
+
+		case ModeConnectWarn:
+			if msg.String() == "y" || msg.String() == "Y" || msg.String() == "enter" {
+				m.SelectedDest = m.warnTarget
+				return m, tea.Quit
+			}
+			if msg.String() == "n" || msg.String() == "N" || msg.String() == "esc" {
+				m.mode = ModeSelect
+				return m, nil
+			}
 		}
 	}
 
-	// Mode-specific updates
 	if m.mode == ModeSelect {
 		m.list, cmd = m.list.Update(msg)
 	}
@@ -339,6 +405,8 @@ func (m Model) View() string {
 		return docStyle.Render(m.viewConfigure())
 	case ModeDeleteConfirm:
 		return docStyle.Render(m.viewDeleteConfirm())
+	case ModeConnectWarn:
+		return docStyle.Render(m.viewConnectWarn())
 	}
 	return ""
 }
@@ -346,24 +414,18 @@ func (m Model) View() string {
 // --- Configure Mode Logic ---
 
 func (m Model) updateConfigure(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	// Handle Esc
 	if msg.String() == "esc" {
 		m.mode = ModeSelect
 		return m, nil
 	}
 
-	// Helper to handle focus change
 	changeFocus := func(newIndex int) {
-		// Blur current
 		if m.focusIndex < 3 {
 			m.inputs[m.focusIndex].Blur()
 			m.inputs[m.focusIndex].PromptStyle = noStyle
 			m.inputs[m.focusIndex].TextStyle = noStyle
 		}
-		
 		m.focusIndex = newIndex
-		
-		// Focus new
 		if m.focusIndex < 3 {
 			m.inputs[m.focusIndex].Focus()
 			m.inputs[m.focusIndex].PromptStyle = focusedStyle
@@ -371,7 +433,6 @@ func (m Model) updateConfigure(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 
-	// Handle Tab/Shift+Tab for navigation
 	if msg.String() == "tab" {
 		changeFocus((m.focusIndex + 1) % 5)
 		return m, nil
@@ -381,7 +442,6 @@ func (m Model) updateConfigure(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	// Handle Up/Down for input fields (0-2)
 	if m.focusIndex < 3 {
 		switch msg.String() {
 		case "up":
@@ -396,45 +456,38 @@ func (m Model) updateConfigure(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			changeFocus(m.focusIndex + 1)
 			return m, nil
 		}
-		
 		var cmd tea.Cmd
 		m.inputs[m.focusIndex], cmd = m.inputs[m.focusIndex].Update(msg)
 		return m, cmd
 	}
 
-	// Handle Key Picker (3)
 	if m.focusIndex == 3 {
-		// Logic: Up/Down navigates list. Enter selects.
-		// If at top and Up pressed, go to previous field?
-		
 		if msg.String() == "up" && m.keyPicker.Index() == 0 {
-			// Exit picker upwards
 			changeFocus(2)
 			return m, nil
 		}
 		if msg.String() == "enter" {
-			// Selection made (we just keep the state in the picker)
 			changeFocus(4)
 			return m, nil
 		}
-		
 		var cmd tea.Cmd
 		m.keyPicker, cmd = m.keyPicker.Update(msg)
 		return m, cmd
 	}
 
-	// Handle Group Picker (4)
 	if m.focusIndex == 4 {
 		if msg.String() == "up" && m.groupPicker.Index() == 0 {
 			changeFocus(3)
 			return m, nil
 		}
 		if msg.String() == "enter" {
-			// Submit!
 			m.saveDestination()
 			m.mode = ModeSelect
 			m.refreshList()
-			return m, nil
+			// Check the new host
+			newAlias := m.inputs[0].Value()
+			newHost := m.inputs[1].Value()
+			return m, checkHostCmd(newAlias, newHost)
 		}
 		var cmd tea.Cmd
 		m.groupPicker, cmd = m.groupPicker.Update(msg)
@@ -446,20 +499,16 @@ func (m Model) updateConfigure(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (m Model) viewConfigure() string {
 	var b strings.Builder
-
 	b.WriteString(titleStyle.Render("New Destination") + "\n\n")
 
-	// Render Inputs
 	for i := 0; i < 3; i++ {
 		b.WriteString(m.inputs[i].View() + "\n")
 	}
 
-	// Render Key Picker
 	b.WriteString("\n" + m.renderPickerLabel("SSH Key", m.focusIndex == 3))
 	if m.focusIndex == 3 {
 		b.WriteString("\n" + m.keyPicker.View())
 	} else {
-		// Show selected value
 		val := m.keyPicker.SelectedItem()
 		txt := "[Select...]"
 		if val != nil {
@@ -468,7 +517,6 @@ func (m Model) viewConfigure() string {
 		b.WriteString(" " + txt + "\n")
 	}
 
-	// Render Group Picker
 	b.WriteString("\n" + m.renderPickerLabel("Group", m.focusIndex == 4))
 	if m.focusIndex == 4 {
 		b.WriteString("\n" + m.groupPicker.View())
@@ -482,7 +530,6 @@ func (m Model) viewConfigure() string {
 	}
 
 	b.WriteString("\n\n" + helpStyle.Render("[Enter] Next/Save  [Up/Down] Navigate  [Esc] Cancel"))
-
 	return b.String()
 }
 
@@ -508,26 +555,20 @@ func (m *Model) saveDestination() {
 	if alias == "" { return }
 	if hostname == "" { hostname = alias }
 
-	// Handle Key Generation
 	if key == "[Generate New]" {
 		generatedKey, err := m.sshManager.GenerateKey(hostname)
 		if err == nil {
 			key = generatedKey
 		} else {
-			// Fallback if gen fails? 
-			// For now, we'll just save the error or empty.
-			// Ideally we'd show an error message.
 			key = ""
 		}
 	} else {
-		// Reconstruct full path if it was a file name from ~/.ssh
 		if !strings.HasPrefix(key, "/") && !strings.HasPrefix(key, "~") && key != "" {
 			home, _ := os.UserHomeDir()
 			key = home + "/.ssh/" + key
 		}
 	}
 
-	// Handle Group
 	if group == "[None]" {
 		group = ""
 	}
@@ -551,5 +592,13 @@ func (m Model) viewDeleteConfirm() string {
 	s += fmt.Sprintf("Are you sure you want to delete %q?\n", m.deleteTarget.Alias)
 	s += "This will also remove it from SSH config.\n\n"
 	s += "[Y] Yes, Delete  [N] Cancel"
+	return s
+}
+
+func (m Model) viewConnectWarn() string {
+	s := titleStyle.Render("Warning: Host Identity Changed!") + "\n\n"
+	s += fmt.Sprintf("The fingerprint for %q does not match known_hosts.\n", m.warnTarget.Alias)
+	s += "This could mean the server has been reinstalled or a MITM attack.\n\n"
+	s += "[Y] Connect Anyway  [N] Cancel"
 	return s
 }

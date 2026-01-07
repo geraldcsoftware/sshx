@@ -31,6 +31,16 @@ type GroupSettings struct {
 	User string `yaml:"user"`
 }
 
+// Status represents the connectivity and fingerprint status
+type Status int
+
+const (
+	StatusUnknown Status = iota
+	StatusOk
+	StatusOffline
+	StatusKeyError
+)
+
 // Destination represents a single SSH target
 type Destination struct {
 	Alias           string    `yaml:"alias"`
@@ -40,6 +50,7 @@ type Destination struct {
 	Group           string    `yaml:"group,omitempty"`
 	LastConnectedAt time.Time `yaml:"last_connected_at"`
 	ConnectionCount int       `yaml:"connection_count"`
+	Status          Status    `yaml:"-"` // Runtime status, not persisted
 }
 
 // Load reads the configuration from ~/.config/sshx/config.yaml
