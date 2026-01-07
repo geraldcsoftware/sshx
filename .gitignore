@@ -1,5 +1,5 @@
 # Binaries
-sshx
+/sshx
 *.exe
 *.exe~
 *.dll
