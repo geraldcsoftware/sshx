@@ -10,6 +10,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"sshx/internal/config"
+	"sshx/internal/importer"
 	"sshx/internal/ssh"
 	"sshx/internal/tui"
 )
@@ -21,6 +22,7 @@ var (
 Usage:
   sshx [filter]         Launch TUI, optionally filtering by name
   sshx --configure <host>  Launch TUI in configure mode for host
+  sshx --import         Import hosts from ~/.ssh/config
   sshx --help           Show this help message
   sshx --version        Show version information
 
@@ -35,6 +37,7 @@ Keybindings:
 
 func main() {
 	configureFlag := flag.String("configure", "", "Configure a new host")
+	importFlag := flag.Bool("import", false, "Import hosts from ~/.ssh/config")
 	helpFlag := flag.Bool("help", false, "Show help")
 	versionFlag := flag.Bool("version", false, "Show version")
 	flag.Parse()
@@ -54,6 +57,39 @@ func main() {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error loading config: %v\n", err)
 		os.Exit(1)
+	}
+
+	if *importFlag {
+		imported, err := importer.ParseSSHConfig("")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error importing config: %v\n", err)
+			os.Exit(1)
+		}
+
+		// Dedup
+		existing := make(map[string]bool)
+		for _, d := range cfg.Destinations {
+			existing[d.Alias] = true
+		}
+
+		count := 0
+		for _, d := range imported {
+			if !existing[d.Alias] {
+				cfg.Destinations = append(cfg.Destinations, d)
+				existing[d.Alias] = true
+				count++
+			}
+		}
+
+		if count > 0 {
+			if err := cfg.Save(); err != nil {
+				fmt.Fprintf(os.Stderr, "Error saving config: %v\n", err)
+				os.Exit(1)
+			}
+		}
+
+		fmt.Printf("Imported %d new hosts from ~/.ssh/config\n", count)
+		os.Exit(0)
 	}
 
 	// Init SSH Manager
