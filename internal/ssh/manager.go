@@ -111,3 +111,40 @@ func (m *Manager) GenerateKey(hostname string) (string, error) {
 
 	return keyPath, nil
 }
+
+// ListKeys returns a list of private keys in ~/.ssh/
+func (m *Manager) ListKeys() ([]string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil, err
+	}
+	sshDir := filepath.Join(home, ".ssh")
+
+	entries, err := os.ReadDir(sshDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return []string{}, nil
+		}
+		return nil, err
+	}
+
+	var keys []string
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		// Filter out common non-key files
+		if strings.HasSuffix(name, ".pub") ||
+			name == "known_hosts" ||
+			name == "config" ||
+			name == "authorized_keys" ||
+			name == "environment" ||
+			strings.HasPrefix(name, "known_hosts") {
+			continue
+		}
+
+		keys = append(keys, filepath.Join(sshDir, name))
+	}
+	return keys, nil
+}

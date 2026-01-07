@@ -2,9 +2,11 @@ package tui
 
 import (
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
+	"github.com/charmbracelet/bubbles/list"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -26,231 +28,47 @@ var (
 	primaryColor   = lipgloss.Color("#FF00FF") // Magenta
 	secondaryColor = lipgloss.Color("#9B59B6") // Purple
 	subtleColor    = lipgloss.Color("#626262") // Grey
+	docStyle       = lipgloss.NewStyle().Margin(1, 2)
 
-	titleStyle = lipgloss.NewStyle().
-			Foreground(primaryColor).
-			Bold(true).
-			Padding(0, 1)
+	// List Styles
+	titleStyle = lipgloss.NewStyle(). 
+		Foreground(primaryColor).
+		Bold(true).
+		Padding(0, 1)
 
-	selectedItemStyle = lipgloss.NewStyle().
-				Background(primaryColor).
-				Foreground(lipgloss.Color("#FFFFFF")).
-				Padding(0, 1)
+	itemStyle = lipgloss.NewStyle().PaddingLeft(2)
 
-	itemStyle = lipgloss.NewStyle().
-				Padding(0, 1)
+	selectedItemStyle = lipgloss.NewStyle(). 
+		Border(lipgloss.NormalBorder(), false, false, false, true).
+		BorderForeground(primaryColor).
+		Foreground(primaryColor).
+		PaddingLeft(1)
 
-	groupStyle = lipgloss.NewStyle().
-				Foreground(secondaryColor)
+	paginationStyle = list.DefaultStyles().PaginationStyle.PaddingLeft(4)
 
-	helpStyle = lipgloss.NewStyle().
-				Foreground(subtleColor).
-				PaddingTop(1)
+	helpStyle = list.DefaultStyles().HelpStyle.PaddingLeft(4).PaddingBottom(1)
+
+	// Form Styles
+	focusedStyle = lipgloss.NewStyle().Foreground(primaryColor)
+	blurredStyle = lipgloss.NewStyle().Foreground(subtleColor)
+	cursorStyle  = focusedStyle.Copy()
+	noStyle      = lipgloss.NewStyle()
+
+	focusedButton = focusedStyle.Copy().Render("[ Submit ]")
+	blurredButton = fmt.Sprintf("[ %s ]", blurredStyle.Render("Submit"))
 )
 
-type Model struct {
-	cfg        *config.Config
-	sshManager *ssh.Manager
-	mode       Mode
-
-	// Select Mode State
-	filterInput  textinput.Model
-	filteredList []config.Destination
-	cursor       int
-	
-	// Configure Mode State
-	configInputs []textinput.Model
-	configFocus  int
-
-	// Delete Mode State
-	deleteTarget *config.Destination
-
-	// Output
-	SelectedDest *config.Destination // Set when user selects a destination to connect
-	Quitting     bool
+// DestinationItem implements list.Item
+type DestinationItem struct {
+	Dest config.Destination
 }
 
-func NewModel(cfg *config.Config, sshMgr *ssh.Manager, initialFilter string, configureHost string) Model {
-	ti := textinput.New()
-	ti.Placeholder = "Filter destinations..."
-	ti.Focus()
-	ti.CharLimit = 156
-	ti.Width = 40
-	ti.SetValue(initialFilter)
-
-	// Configure inputs
-	inputs := make([]textinput.Model, 5)
-	labels := []string{"Alias", "Hostname", "User", "SSH Key", "Group"}
-	for i := range inputs {
-		t := textinput.New()
-		t.Placeholder = labels[i]
-		t.CharLimit = 64
-		t.Width = 40
-		inputs[i] = t
-	}
-
-	m := Model{
-		cfg:          cfg,
-		sshManager:   sshMgr,
-		mode:         ModeSelect,
-		filterInput:  ti,
-		configInputs: inputs,
-	}
-
-	m.updateFilteredList()
-	
-	// Handle explicit configure mode or no matches
-	if configureHost != "" {
-		m.mode = ModeConfigure
-		m.configInputs[0].SetValue(configureHost)
-		m.configInputs[1].SetValue(configureHost)
-		m.configInputs[0].Focus()
-	} else if initialFilter != "" && len(m.filteredList) == 0 {
-		m.mode = ModeConfigure
-		m.configInputs[0].SetValue(initialFilter) // Set Alias
-		m.configInputs[1].SetValue(initialFilter) // Set Hostname (default)
-		m.configInputs[0].Focus()
-	}
-
-	return m
+func (i DestinationItem) Title() string       { return i.Dest.Alias }
+func (i DestinationItem) Description() string {
+	t := timeAgo(i.Dest.LastConnectedAt)
+	return fmt.Sprintf("%s • %s", i.Dest.Hostname, t)
 }
-
-func (m Model) Init() tea.Cmd {
-	return textinput.Blink
-}
-
-func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	var cmd tea.Cmd
-
-	switch msg := msg.(type) {
-	case tea.KeyMsg:
-		switch m.mode {
-		case ModeSelect:
-			return m.updateSelect(msg)
-		case ModeConfigure:
-			return m.updateConfigure(msg)
-		case ModeDeleteConfirm:
-			return m.updateDeleteConfirm(msg)
-		}
-	}
-
-	// Handle blinking cursor for inputs
-	if m.mode == ModeSelect {
-		m.filterInput, cmd = m.filterInput.Update(msg)
-	} else if m.mode == ModeConfigure {
-		cmds := make([]tea.Cmd, len(m.configInputs))
-		for i := range m.configInputs {
-			m.configInputs[i], cmds[i] = m.configInputs[i].Update(msg)
-		}
-		cmd = tea.Batch(cmds...)
-	}
-
-	return m, cmd
-}
-
-func (m Model) View() string {
-	if m.Quitting {
-		return ""
-	}
-
-	switch m.mode {
-	case ModeSelect:
-		return m.viewSelect()
-	case ModeConfigure:
-		return m.viewConfigure()
-	case ModeDeleteConfirm:
-		return m.viewDeleteConfirm()
-	}
-	return ""
-}
-
-// --- Select Mode Logic ---
-
-func (m Model) updateSelect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.String() {
-	case "ctrl+c", "esc":
-		m.Quitting = true
-		return m, tea.Quit
-	case "up", "k":
-		if m.cursor > 0 {
-			m.cursor--
-		}
-	case "down", "j":
-		if m.cursor < len(m.filteredList)-1 {
-			m.cursor++
-		}
-	case "enter":
-		if len(m.filteredList) > 0 {
-			m.SelectedDest = &m.filteredList[m.cursor]
-			return m, tea.Quit
-		}
-	case "ctrl+n":
-		m.mode = ModeConfigure
-		m.configFocus = 0
-		m.configInputs[0].Focus()
-	case "ctrl+d":
-		if len(m.filteredList) > 0 {
-			m.deleteTarget = &m.filteredList[m.cursor]
-			m.mode = ModeDeleteConfirm
-		}
-	}
-	
-	// Pass to text input if not handled
-	var cmd tea.Cmd
-	m.filterInput, cmd = m.filterInput.Update(msg)
-	m.updateFilteredList()
-	return m, cmd
-}
-
-func (m *Model) updateFilteredList() {
-	filter := m.filterInput.Value()
-	m.filteredList = []config.Destination{}
-	
-	// Sort config destinations by frecency first
-	m.cfg.SortDestinations()
-
-	for _, d := range m.cfg.Destinations {
-		if d.Matches(filter) {
-			m.filteredList = append(m.filteredList, d)
-		}
-	}
-	
-	// Reset cursor if out of bounds
-	if m.cursor >= len(m.filteredList) {
-		m.cursor = max(0, len(m.filteredList)-1)
-	}
-}
-
-func (m Model) viewSelect() string {
-	s := titleStyle.Render("sshx") + "\n"
-	s += fmt.Sprintf("Filter: %s\n\n", m.filterInput.View())
-
-	for i, d := range m.filteredList {
-		cursor := "  "
-		style := itemStyle
-		if i == m.cursor {
-			cursor = "▶ "
-			style = selectedItemStyle
-		}
-
-		group := ""
-		if d.Group != "" {
-			group = groupStyle.Render(fmt.Sprintf("[%s] ", d.Group))
-		}
-
-		timeStr := timeAgo(d.LastConnectedAt)
-		// Basic padding for alignment - can be improved but keeps it simple
-		line := fmt.Sprintf("%s%s %s%s  (last: %s)", cursor, d.Alias, group, d.Hostname, timeStr)
-		s += style.Render(line) + "\n"
-	}
-
-	if len(m.filteredList) == 0 {
-		s += "\nNo matches. Press Ctrl+N to add new.\n"
-	}
-
-	s += helpStyle.Render("\n⏎ connect  Ctrl+N new  Ctrl+D delete  Esc quit")
-	return s
-}
+func (i DestinationItem) FilterValue() string { return i.Dest.Alias + " " + i.Dest.Hostname }
 
 func timeAgo(t time.Time) string {
 	if t.IsZero() {
@@ -269,64 +87,449 @@ func timeAgo(t time.Time) string {
 	return fmt.Sprintf("%dd ago", int(diff.Hours()/24))
 }
 
-// --- Configure Mode Logic ---
+// SimpleItem implements list.Item for basic strings
+type SimpleItem string
 
-func (m Model) updateConfigure(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.String() {
-	case "esc":
-		m.mode = ModeSelect
-		return m, nil
-	case "tab":
-		m.configInputs[m.configFocus].Blur()
-		m.configFocus = (m.configFocus + 1) % len(m.configInputs)
-		m.configInputs[m.configFocus].Focus()
-		return m, nil
-	case "shift+tab":
-		m.configInputs[m.configFocus].Blur()
-		m.configFocus = (m.configFocus - 1 + len(m.configInputs)) % len(m.configInputs)
-		m.configInputs[m.configFocus].Focus()
-		return m, nil
-	case "enter":
-		if m.configFocus == len(m.configInputs)-1 {
-			// Save
-			m.saveDestination()
-			m.mode = ModeSelect
-			m.updateFilteredList()
-			return m, nil
+func (s SimpleItem) Title() string       { return string(s) }
+func (s SimpleItem) Description() string { return "" }
+func (s SimpleItem) FilterValue() string { return string(s) }
+
+// Model is the main TUI model
+type Model struct {
+	cfg        *config.Config
+	sshManager *ssh.Manager
+	mode       Mode
+
+	// Select Mode
+	list list.Model
+
+	// Configure Mode
+	focusIndex    int
+	inputs        []textinput.Model
+	keyPicker     list.Model
+	groupPicker   list.Model
+	showKeyPicker bool
+	showGroupPicker bool
+	
+	// Delete Mode
+	deleteTarget *config.Destination
+
+	// State
+	Quitting     bool
+	SelectedDest *config.Destination
+	windowWidth  int
+	windowHeight int
+}
+
+func NewModel(cfg *config.Config, sshMgr *ssh.Manager, initialFilter string, configureHost string) Model {
+	// Initialize Inputs
+	inputs := make([]textinput.Model, 3)
+	labels := []string{"Alias", "Hostname", "User"}
+	for i := range inputs {
+		t := textinput.New()
+		t.Cursor.Style = cursorStyle
+		t.CharLimit = 64
+		t.Prompt = labels[i] + ": "
+		
+		switch i {
+		case 0:
+			t.Placeholder = "my-server"
+			t.Focus()
+			t.PromptStyle = focusedStyle
+			t.TextStyle = focusedStyle
+		case 1:
+			t.Placeholder = "server.example.com"
+		case 2:
+			t.Placeholder = "root (optional)"
 		}
-		// Move to next field
-		m.configInputs[m.configFocus].Blur()
-		m.configFocus++
-		m.configInputs[m.configFocus].Focus()
-		return m, nil
+		inputs[i] = t
 	}
 
+	// Initialize Pickers
+	// Key Picker
+	keyList := list.New([]list.Item{}, list.NewDefaultDelegate(), 0, 0)
+	keyList.Title = "Select SSH Key"
+	keyList.SetShowHelp(false)
+	keyList.SetHeight(6)
+	keyList.SetShowTitle(false)
+	keyList.SetShowStatusBar(false)
+	keyList.SetFilteringEnabled(true)
+	keyList.DisableQuitKeybindings()
+
+	// Group Picker
+	groupList := list.New([]list.Item{}, list.NewDefaultDelegate(), 0, 0)
+	groupList.Title = "Select Group"
+	groupList.SetShowHelp(false)
+	groupList.SetHeight(6)
+	groupList.SetShowTitle(false)
+	groupList.SetShowStatusBar(false)
+	groupList.SetFilteringEnabled(true)
+	groupList.DisableQuitKeybindings()
+
+	// Main List
+	delegate := list.NewDefaultDelegate()
+	delegate.Styles.SelectedTitle = selectedItemStyle
+	delegate.Styles.SelectedDesc = selectedItemStyle.Copy().Foreground(secondaryColor)
+
+	l := list.New([]list.Item{}, delegate, 0, 0)
+	l.Title = "SSH Destinations"
+	l.SetShowStatusBar(false)
+	l.SetFilteringEnabled(true)
+	l.Styles.Title = titleStyle
+	l.Styles.PaginationStyle = paginationStyle
+	l.Styles.HelpStyle = helpStyle
+	l.FilterInput.SetValue(initialFilter)
+
+	m := Model{
+		cfg:         cfg,
+		sshManager:  sshMgr,
+		mode:        ModeSelect,
+		list:        l,
+		inputs:      inputs,
+		keyPicker:   keyList,
+		groupPicker: groupList,
+	}
+
+	m.refreshList()
+	m.refreshPickers()
+
+	// Handle initial state
+	if configureHost != "" {
+		m.mode = ModeConfigure
+		m.inputs[0].SetValue(configureHost)
+		m.inputs[1].SetValue(configureHost)
+	} else if initialFilter != "" && len(m.list.Items()) == 0 {
+		m.mode = ModeConfigure
+		m.inputs[0].SetValue(initialFilter)
+		m.inputs[1].SetValue(initialFilter)
+	}
+
+	return m
+}
+
+func (m *Model) refreshList() {
+	m.cfg.SortDestinations()
+	items := make([]list.Item, len(m.cfg.Destinations))
+	for i, d := range m.cfg.Destinations {
+		items[i] = DestinationItem{Dest: d}
+	}
+	m.list.SetItems(items)
+}
+
+func (m *Model) refreshPickers() {
+	// Keys
+	keys, _ := m.sshManager.ListKeys()
+	keyItems := []list.Item{SimpleItem("[Generate New]")}
+	for _, k := range keys {
+		// simplify display to show only filename
+		parts := strings.Split(k, "/")
+		name := parts[len(parts)-1]
+		keyItems = append(keyItems, SimpleItem(name))
+	}
+	m.keyPicker.SetItems(keyItems)
+
+	// Groups
+	uniqueGroups := make(map[string]bool)
+	for _, d := range m.cfg.Destinations {
+		if d.Group != "" {
+		
+uniqueGroups[d.Group] = true
+		}
+	}
+	// Also add groups from config definition
+	for g := range m.cfg.Groups {
+		uniqueGroups[g] = true
+	}
+
+	groupItems := []list.Item{SimpleItem("[None]")}
+	for g := range uniqueGroups {
+		groupItems = append(groupItems, SimpleItem(g))
+	}
+	m.groupPicker.SetItems(groupItems)
+}
+
+func (m Model) Init() tea.Cmd {
+	return textinput.Blink
+}
+
+func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
-	m.configInputs[m.configFocus], cmd = m.configInputs[m.configFocus].Update(msg)
+
+	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		m.windowWidth = msg.Width
+		m.windowHeight = msg.Height
+		h, v := docStyle.GetFrameSize()
+		m.list.SetSize(msg.Width-h, msg.Height-v)
+		// Set picker widths
+		m.keyPicker.SetWidth(msg.Width - h - 4)
+		m.groupPicker.SetWidth(msg.Width - h - 4)
+
+	case tea.KeyMsg:
+		// Global Quitting
+		if msg.String() == "ctrl+c" {
+			m.Quitting = true
+			return m, tea.Quit
+		}
+
+		switch m.mode {
+		case ModeSelect:
+			if msg.String() == "ctrl+n" || msg.String() == "c" && m.list.FilterState() != list.Filtering {
+				m.mode = ModeConfigure
+				m.focusIndex = 0
+				return m, nil
+			}
+			if msg.String() == "enter" {
+				if i, ok := m.list.SelectedItem().(DestinationItem); ok {
+					m.SelectedDest = &i.Dest
+					return m, tea.Quit
+				}
+			}
+			if msg.String() == "d" && m.list.FilterState() != list.Filtering {
+				if i, ok := m.list.SelectedItem().(DestinationItem); ok {
+					m.deleteTarget = &i.Dest
+					m.mode = ModeDeleteConfirm
+					return m, nil
+				}
+			}
+
+		case ModeConfigure:
+			return m.updateConfigure(msg)
+			
+		case ModeDeleteConfirm:
+			if msg.String() == "y" || msg.String() == "Y" || msg.String() == "enter" {
+				// Execute Delete
+				newDest := []config.Destination{}
+				for _, d := range m.cfg.Destinations {
+					if d.Alias != m.deleteTarget.Alias {
+						newDest = append(newDest, d)
+					}
+				}
+				m.cfg.Destinations = newDest
+				m.cfg.Save()
+				m.sshManager.SyncConfig()
+				m.mode = ModeSelect
+				m.refreshList()
+				return m, nil
+			}
+			if msg.String() == "n" || msg.String() == "N" || msg.String() == "esc" {
+				m.mode = ModeSelect
+				return m, nil
+			}
+		}
+	}
+
+	// Mode-specific updates
+	if m.mode == ModeSelect {
+		m.list, cmd = m.list.Update(msg)
+	}
+
 	return m, cmd
 }
 
-func (m *Model) saveDestination() {
-	alias := m.configInputs[0].Value()
-	hostname := m.configInputs[1].Value()
-	user := m.configInputs[2].Value()
-	key := m.configInputs[3].Value()
-	group := m.configInputs[4].Value()
+func (m Model) View() string {
+	if m.Quitting {
+		return ""
+	}
 
-	if alias == "" { return } // Basic validation
+	switch m.mode {
+	case ModeSelect:
+		return docStyle.Render(m.list.View())
+	case ModeConfigure:
+		return docStyle.Render(m.viewConfigure())
+	case ModeDeleteConfirm:
+		return docStyle.Render(m.viewDeleteConfirm())
+	}
+	return ""
+}
+
+// --- Configure Mode Logic ---
+
+func (m Model) updateConfigure(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// Handle Esc
+	if msg.String() == "esc" {
+		m.mode = ModeSelect
+		return m, nil
+	}
+
+	// Helper to handle focus change
+	changeFocus := func(newIndex int) {
+		// Blur current
+		if m.focusIndex < 3 {
+			m.inputs[m.focusIndex].Blur()
+			m.inputs[m.focusIndex].PromptStyle = noStyle
+			m.inputs[m.focusIndex].TextStyle = noStyle
+		}
+		
+		m.focusIndex = newIndex
+		
+		// Focus new
+		if m.focusIndex < 3 {
+			m.inputs[m.focusIndex].Focus()
+			m.inputs[m.focusIndex].PromptStyle = focusedStyle
+			m.inputs[m.focusIndex].TextStyle = focusedStyle
+		}
+	}
+
+	// Handle Tab/Shift+Tab for navigation
+	if msg.String() == "tab" {
+		changeFocus((m.focusIndex + 1) % 5)
+		return m, nil
+	}
+	if msg.String() == "shift+tab" {
+		changeFocus((m.focusIndex - 1 + 5) % 5)
+		return m, nil
+	}
+
+	// Handle Up/Down for input fields (0-2)
+	if m.focusIndex < 3 {
+		switch msg.String() {
+		case "up":
+			if m.focusIndex > 0 {
+				changeFocus(m.focusIndex - 1)
+			}
+			return m, nil
+		case "down":
+			changeFocus(m.focusIndex + 1)
+			return m, nil
+		case "enter":
+			changeFocus(m.focusIndex + 1)
+			return m, nil
+		}
+		
+		var cmd tea.Cmd
+		m.inputs[m.focusIndex], cmd = m.inputs[m.focusIndex].Update(msg)
+		return m, cmd
+	}
+
+	// Handle Key Picker (3)
+	if m.focusIndex == 3 {
+		// Logic: Up/Down navigates list. Enter selects.
+		// If at top and Up pressed, go to previous field?
+		
+		if msg.String() == "up" && m.keyPicker.Index() == 0 {
+			// Exit picker upwards
+			changeFocus(2)
+			return m, nil
+		}
+		if msg.String() == "enter" {
+			// Selection made (we just keep the state in the picker)
+			changeFocus(4)
+			return m, nil
+		}
+		
+		var cmd tea.Cmd
+		m.keyPicker, cmd = m.keyPicker.Update(msg)
+		return m, cmd
+	}
+
+	// Handle Group Picker (4)
+	if m.focusIndex == 4 {
+		if msg.String() == "up" && m.groupPicker.Index() == 0 {
+			changeFocus(3)
+			return m, nil
+		}
+		if msg.String() == "enter" {
+			// Submit!
+			m.saveDestination()
+			m.mode = ModeSelect
+			m.refreshList()
+			return m, nil
+		}
+		var cmd tea.Cmd
+		m.groupPicker, cmd = m.groupPicker.Update(msg)
+		return m, cmd
+	}
+
+	return m, nil
+}
+
+func (m Model) viewConfigure() string {
+	var b strings.Builder
+
+	b.WriteString(titleStyle.Render("New Destination") + "\n\n")
+
+	// Render Inputs
+	for i := 0; i < 3; i++ {
+		b.WriteString(m.inputs[i].View() + "\n")
+	}
+
+	// Render Key Picker
+	b.WriteString("\n" + m.renderPickerLabel("SSH Key", m.focusIndex == 3))
+	if m.focusIndex == 3 {
+		b.WriteString("\n" + m.keyPicker.View())
+	} else {
+		// Show selected value
+		val := m.keyPicker.SelectedItem()
+		txt := "[Select...]"
+		if val != nil {
+			txt = val.FilterValue()
+		}
+		b.WriteString(" " + txt + "\n")
+	}
+
+	// Render Group Picker
+	b.WriteString("\n" + m.renderPickerLabel("Group", m.focusIndex == 4))
+	if m.focusIndex == 4 {
+		b.WriteString("\n" + m.groupPicker.View())
+	} else {
+		val := m.groupPicker.SelectedItem()
+		txt := "[None]"
+		if val != nil {
+			txt = val.FilterValue()
+		}
+		b.WriteString(" " + txt + "\n")
+	}
+
+	b.WriteString("\n\n" + helpStyle.Render("[Enter] Next/Save  [Up/Down] Navigate  [Esc] Cancel"))
+
+	return b.String()
+}
+
+func (m Model) renderPickerLabel(text string, focused bool) string {
+	style := noStyle
+	if focused {
+		style = focusedStyle
+	}
+	return style.Render(text + ":")
+}
+
+func (m *Model) saveDestination() {
+	alias := m.inputs[0].Value()
+	hostname := m.inputs[1].Value()
+	user := m.inputs[2].Value()
+	
+	keyItem, _ := m.keyPicker.SelectedItem().(SimpleItem)
+	groupItem, _ := m.groupPicker.SelectedItem().(SimpleItem)
+	
+	key := string(keyItem)
+	group := string(groupItem)
+
+	if alias == "" { return }
 	if hostname == "" { hostname = alias }
 
-	// Generate key if needed (simple check: if it looks like a path, use it, else generate)
-	// For now, if key is empty or just a name, we might want to generate.
-	// PRD: "Option to generate a new Ed25519 key".
-	// I'll assume if they type "generate" or leave it blank, we generate?
-	// Or maybe I should have a toggle.
-	// For simplicity: If key doesn't start with /, ~, or ., assume it's a name to generate.
-	if key == "" || (!strings.HasPrefix(key, "/") && !strings.HasPrefix(key, ".") && !strings.HasPrefix(key, "~")) {
+	// Handle Key Generation
+	if key == "[Generate New]" {
 		generatedKey, err := m.sshManager.GenerateKey(hostname)
 		if err == nil {
 			key = generatedKey
+		} else {
+			// Fallback if gen fails? 
+			// For now, we'll just save the error or empty.
+			// Ideally we'd show an error message.
+			key = ""
 		}
+	} else {
+		// Reconstruct full path if it was a file name from ~/.ssh
+		if !strings.HasPrefix(key, "/") && !strings.HasPrefix(key, "~") && key != "" {
+			home, _ := os.UserHomeDir()
+			key = home + "/.ssh/" + key
+		}
+	}
+
+	// Handle Group
+	if group == "[None]" {
+		group = ""
 	}
 
 	dest := config.Destination{
@@ -343,54 +546,10 @@ func (m *Model) saveDestination() {
 	m.sshManager.SyncConfig()
 }
 
-func (m Model) viewConfigure() string {
-	s := titleStyle.Render("New Destination") + "\n\n"
-
-	for i, input := range m.configInputs {
-		s += input.View() + "\n"
-		if i < len(m.configInputs)-1 {
-			s += "\n"
-		}
-	}
-
-	s += helpStyle.Render("\n[Enter] Next/Save  [Esc] Cancel")
-	return s
-}
-
-// --- Delete Confirm Logic ---
-
-func (m Model) updateDeleteConfirm(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.String() {
-	case "y", "Y", "enter":
-		// Delete
-		newDest := []config.Destination{}
-		for _, d := range m.cfg.Destinations {
-			if d.Alias != m.deleteTarget.Alias {
-				newDest = append(newDest, d)
-			}
-		}
-		m.cfg.Destinations = newDest
-		m.cfg.Save()
-		m.sshManager.SyncConfig()
-		m.mode = ModeSelect
-		m.updateFilteredList()
-	case "n", "N", "esc":
-		m.mode = ModeSelect
-	}
-	return m, nil
-}
-
 func (m Model) viewDeleteConfirm() string {
 	s := titleStyle.Render("Delete Destination?") + "\n\n"
 	s += fmt.Sprintf("Are you sure you want to delete %q?\n", m.deleteTarget.Alias)
 	s += "This will also remove it from SSH config.\n\n"
 	s += "[Y] Yes, Delete  [N] Cancel"
 	return s
-}
-
-func max(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
 }
