@@ -155,11 +155,12 @@ type Model struct {
 	warnTarget *config.Destination
 
 	// State
-	Quitting      bool
-	SelectedDest  *config.Destination
-	windowWidth   int
-	windowHeight  int
-	initialFilter string
+	Quitting             bool
+	SelectedDest         *config.Destination
+	windowWidth          int
+	windowHeight         int
+	initialFilter        string
+	initialFilterApplied bool // tracks if initial filter has been fully typed
 }
 
 type startFilteringMsg struct{}
@@ -261,6 +262,20 @@ func (m *Model) refreshList() {
 	m.list.SetItems(items)
 }
 
+// updateListItemStatus updates the status of a specific item in-place without
+// calling SetItems(), which would reset the filter state. This is critical for
+// avoiding race conditions when host status checks complete while a filter is active.
+func (m *Model) updateListItemStatus(alias string, status config.Status) {
+	items := m.list.Items()
+	for i, item := range items {
+		if di, ok := item.(DestinationItem); ok && di.Dest.Alias == alias {
+			di.Dest.Status = status
+			items[i] = di
+			break
+		}
+	}
+}
+
 func (m *Model) refreshPickers() {
 	// Keys
 	keys, _ := m.sshManager.ListKeys()
@@ -328,6 +343,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case typeFilterMsg:
 		// Simulate typing the filter
 		m.list, cmd = m.list.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(string(msg))})
+		m.initialFilterApplied = true
 		return m, cmd
 
 	case tea.WindowSizeMsg:
@@ -350,14 +366,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		for i := range m.cfg.Destinations {
 			if m.cfg.Destinations[i].Alias == msg.Result.Alias {
 				m.cfg.Destinations[i].Status = msg.Result.Status
-				// Trigger list refresh to show new status
-				// Note: this might be inefficient if many hosts return at once,
-				// but Bubble Tea handles batching somewhat.
-				// In a larger app, we'd optimize.
-				m.refreshList()
 				break
 			}
 		}
+		// Update status in the list items in-place to preserve filter state.
+		// Using SetItems() would reset the filter, causing a race condition
+		// when the TUI is started with an initial filter argument.
+		m.updateListItemStatus(msg.Result.Alias, msg.Result.Status)
 		return m, nil
 
 	case tea.KeyMsg:
