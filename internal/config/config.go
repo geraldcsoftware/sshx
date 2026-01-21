@@ -21,6 +21,7 @@ type Config struct {
 // Defaults represents global default settings
 type Defaults struct {
 	User string `yaml:"user"`
+	Term string `yaml:"term,omitempty"`
 }
 
 // Groups represents a map of group names to their settings
@@ -171,6 +172,14 @@ func (c *Config) SortDestinations() {
 	sort.Slice(c.Destinations, func(i, j int) bool {
 		return c.Destinations[i].CalculateFrecency() > c.Destinations[j].CalculateFrecency()
 	})
+}
+
+// ResolveTerm determines the effective TERM for a destination
+func (c *Config) ResolveTerm() string {
+	if c.Defaults.Term != "" {
+		return c.Defaults.Term
+	}
+	return "xterm-256color"
 }
 
 // ResolveUser determines the effective user for a destination

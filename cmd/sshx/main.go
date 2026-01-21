@@ -186,7 +186,20 @@ func connect(cfg *config.Config, d *config.Destination) {
 	// and the slice of arguments (including the command name) as the second.
 	// Environment is passed as third arg.
 	env := os.Environ()
-	if err := syscall.Exec(sshBin, args, env); err != nil {
+
+	// Filter out existing TERM from env to avoid leaking it
+	newEnv := make([]string, 0, len(env))
+	for _, e := range env {
+		if !strings.HasPrefix(e, "TERM=") {
+			newEnv = append(newEnv, e)
+		}
+	}
+
+	// Add configured TERM or default
+	term := cfg.ResolveTerm()
+	newEnv = append(newEnv, fmt.Sprintf("TERM=%s", term))
+
+	if err := syscall.Exec(sshBin, args, newEnv); err != nil {
 		fmt.Fprintf(os.Stderr, "Error executing ssh: %v\n", err)
 		os.Exit(1)
 	}
