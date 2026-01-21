@@ -17,7 +17,7 @@ import (
 )
 
 var (
-	version = "0.1.0"
+	version = "0.0.4"
 	help    = `sshx - Terminal-first SSH helper
 
 Usage:
