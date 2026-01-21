@@ -45,6 +45,7 @@ const (
 type Destination struct {
 	Alias           string    `yaml:"alias"`
 	Hostname        string    `yaml:"hostname"`
+	Port            int       `yaml:"port,omitempty"`
 	User            string    `yaml:"user,omitempty"`
 	Key             string    `yaml:"key"`
 	Group           string    `yaml:"group,omitempty"`
@@ -117,7 +118,7 @@ func (d *Destination) CalculateFrecency() float64 {
 
 	now := time.Now()
 	diff := now.Sub(d.LastConnectedAt)
-	
+
 	var weight float64
 	switch {
 	case diff < 4*time.Hour:
@@ -147,7 +148,7 @@ func (d *Destination) Matches(query string) bool {
 	if strings.Contains(target, query) {
 		return true
 	}
-	
+
 	// Check Hostname as well
 	if strings.Contains(strings.ToLower(d.Hostname), query) {
 		return true

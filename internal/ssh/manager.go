@@ -15,6 +15,7 @@ const sshConfigTemplate = `# Managed by sshx - do not edit manually
 {{range .}}
 Host {{.Alias}}
   HostName {{.Hostname}}
+{{if .Port}}  Port {{.Port}}{{end}}
   User {{.User}}
   IdentityFile {{.Key}}
 {{end}}
@@ -46,6 +47,7 @@ func (m *Manager) SyncConfig() error {
 	type hostEntry struct {
 		Alias    string
 		Hostname string
+		Port     int
 		User     string
 		Key      string
 	}
@@ -55,6 +57,7 @@ func (m *Manager) SyncConfig() error {
 		entries = append(entries, hostEntry{
 			Alias:    d.Alias,
 			Hostname: d.Hostname,
+			Port:     d.Port,
 			User:     m.cfg.ResolveUser(&d),
 			Key:      d.Key,
 		})

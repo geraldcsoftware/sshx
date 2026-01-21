@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strings"
 	"syscall"
 	"time"
 
@@ -149,11 +150,26 @@ func connect(cfg *config.Config, d *config.Destination) {
 	if d.Key != "" {
 		args = append(args, "-i", d.Key)
 	}
+	if d.Port != 0 {
+		args = append(args, "-p", fmt.Sprintf("%d", d.Port))
+	} else {
+		// Default port
+		// While ssh defaults to 22, explicit default helps if configs are messed up
+		// or if we want to change default later.
+		// However, passing -p 22 is safe.
+		// For now we will rely on ssh default or explicit override.
+		// Wait, user asked for "defaulting to 22, allowing override".
+		// SSH client defaults to 22 anyway.
+		// If we want to be explicit:
+		// args = append(args, "-p", "22")
+	}
 
-	// Standard flags from PRD
-	args = append(args, 
+	// Standard flags from PRD + sensible defaults
+	args = append(args,
+		"-o", "ConnectTimeout=10",
 		"-o", "ServerAliveInterval=60",
 		"-o", "ServerAliveCountMax=3",
+		"-o", "TCPKeepAlive=yes",
 		"-o", "ControlMaster=auto",
 		"-o", "ControlPersist=5m",
 	)

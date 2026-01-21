@@ -5,8 +5,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"sshx/internal/config"
+	"strconv"
+	"strings"
 )
 
 // ParseSSHConfig reads the SSH config file from the given path (or default ~/.ssh/config)
@@ -84,6 +85,13 @@ func ParseSSHConfig(path string) ([]config.Destination, error) {
 		case "user":
 			if currentDest != nil {
 				currentDest.User = value
+			}
+
+		case "port":
+			if currentDest != nil {
+				if p, err := strconv.Atoi(value); err == nil {
+					currentDest.Port = p
+				}
 			}
 
 		case "identityfile":
