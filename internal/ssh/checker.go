@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -28,10 +29,11 @@ func CheckHost(alias, hostname string, timeout time.Duration) CheckResult {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	keyscanCmd := exec.CommandContext(ctx, "ssh-keyscan", hostname)
+	keyscanCmd := exec.CommandContext(ctx, "ssh-keyscan", "-q", hostname)
 	var scanOut bytes.Buffer
 	keyscanCmd.Stdout = &scanOut
-	
+	keyscanCmd.Stderr = io.Discard
+
 	if err := keyscanCmd.Run(); err != nil {
 		res.Status = config.StatusOffline
 		res.Message = "Host unreachable"
@@ -45,10 +47,11 @@ func CheckHost(alias, hostname string, timeout time.Duration) CheckResult {
 	}
 
 	// 2. Parse current fingerprint
-	fingerprintCmd := exec.Command("ssh-keygen", "-lf", "-")
+	fingerprintCmd := exec.Command("ssh-keygen", "-q", "-lf", "-")
 	fingerprintCmd.Stdin = &scanOut
 	var fingerprintOut bytes.Buffer
 	fingerprintCmd.Stdout = &fingerprintOut
+	fingerprintCmd.Stderr = io.Discard
 
 	if err := fingerprintCmd.Run(); err != nil {
 		res.Status = config.StatusKeyError
@@ -73,9 +76,10 @@ func CheckHost(alias, hostname string, timeout time.Duration) CheckResult {
 	}
 	knownHostsPath := filepath.Join(home, ".ssh", "known_hosts")
 
-	knownCmd := exec.Command("ssh-keygen", "-F", hostname, "-f", knownHostsPath, "-l")
+	knownCmd := exec.Command("ssh-keygen", "-q", "-F", hostname, "-f", knownHostsPath, "-l")
 	var knownOut bytes.Buffer
 	knownCmd.Stdout = &knownOut
+	knownCmd.Stderr = io.Discard
 
 	if err := knownCmd.Run(); err != nil {
 		res.Status = config.StatusKeyError
@@ -110,7 +114,7 @@ func CheckHost(alias, hostname string, timeout time.Duration) CheckResult {
 		res.Message = "Fingerprint verified"
 	} else {
 		res.Status = config.StatusKeyError
-		res.Message = fmt.Sprintf("Fingerprint mismatch. Current: %s, Known: %s", 
+		res.Message = fmt.Sprintf("Fingerprint mismatch. Current: %s, Known: %s",
 			firstOrEmpty(currentFingerprints), firstOrEmpty(knownFingerprints))
 	}
 
