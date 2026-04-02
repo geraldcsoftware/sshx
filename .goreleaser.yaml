@@ -72,7 +72,7 @@ brews:
 
     # The project name and current version are available in the Template.
     # Default is the project name.
-    # folder: Formula
+    folder: Formula
 
     # Homepage description.
     homepage: "https://github.com/geraldcsoftware/sshx"
